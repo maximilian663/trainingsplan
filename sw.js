@@ -1,6 +1,6 @@
 // Offline-Cache: App-Dateien werden beim Installieren gespeichert.
 // Bei Änderungen an der App die Versionsnummer erhöhen.
-const CACHE = 'trainingsplan-v1';
+const CACHE = 'trainingsplan-v2';
 const FILES = [
   './',
   'index.html',

@@ -84,6 +84,51 @@ function rowSummary(r) {
   if (r.puls) parts.push(`Puls ${r.puls}`);
   return parts.join(' · ') || 'keine Werte';
 }
+/* ----- Auswertung ----- */
+
+// Leistung einer Übung: Volumen (kg × Wdh × Sätze), ohne Gewicht nur Wiederholungen gesamt.
+function perf(r) {
+  const s = num(r?.saetze), w = num(r?.wdh), kg = num(r?.kg);
+  if (!s || !w) return null;
+  return { reps: s * w, kg: kg || null, vol: kg ? kg * s * w : null };
+}
+const signed = (n, unit) => `${n > 0 ? '+' : '−'}${fmtNum(Math.abs(n))} ${unit}`;
+
+// Vergleich zweier Einträge: dir = up | down | same, label = was sich geändert hat.
+function compareRows(cur, prev) {
+  const a = perf(cur), b = perf(prev);
+  if (!a || !b || !!a.kg !== !!b.kg) return null;
+  const diff = a.kg ? a.vol - b.vol : a.reps - b.reps;
+  const parts = [];
+  if (a.kg && a.kg !== b.kg) parts.push(signed(a.kg - b.kg, 'kg'));
+  if (a.reps !== b.reps) parts.push(signed(a.reps - b.reps, 'Wdh'));
+  const dir = Math.abs(diff) < 1e-9 ? 'same' : diff > 0 ? 'up' : 'down';
+  return { dir, diff, label: parts.join(', ') || 'gleich' };
+}
+const ARROWS = { up: '↑', down: '↓', same: '=' };
+function trendChip(c) {
+  return c ? `<span class="trend ${c.dir}">${ARROWS[c.dir]} ${esc(c.label)}</span>` : '';
+}
+
+// Kennzahl für Diagramme und Übersicht: Gewicht, bei Übungen ohne Gewicht Wiederholungen gesamt.
+function seriesFor(hist) {
+  const withKg = hist.filter(h => num(h.row.kg) !== null);
+  if (withKg.length) return { unit: 'kg', label: 'Gewicht', pts: withKg.map(h => ({ date: h.s.date, v: num(h.row.kg) })) };
+  const withReps = hist.map(h => ({ date: h.s.date, v: perf(h.row)?.reps ?? null })).filter(p => p.v !== null);
+  return { unit: 'Wdh', label: 'Wiederholungen gesamt (Sätze × Wdh)', pts: withReps };
+}
+
+// Anzahl Vergleiche in Folge (vom neuesten rückwärts) ohne Steigerung.
+function stagnation(hist) {
+  let n = 0;
+  for (let i = hist.length - 1; i > 0; i--) {
+    const c = compareRows(hist[i].row, hist[i - 1].row);
+    if (!c || c.dir === 'up') break;
+    n++;
+  }
+  return n;
+}
+
 function rowFromItem(item) {
   const last = lastEntry(item.exId)?.row;
   return {
@@ -192,7 +237,7 @@ function trackRowHTML(r, i, ref) {
       <div class="ex">
         <button class="ex-name" data-action="row-menu" data-i="${i}">${esc(ex.name)}</button>
         <div class="ex-meta">${esc(exMeta(ex))}</div>
-        <div class="ex-last">${esc(lastTxt)}</div>
+        <div class="ex-last">${esc(lastTxt)} <span class="trend-slot">${last ? trendChip(compareRows(r, last.row)) : ''}</span></div>
       </div>
       ${cell('saetze', 'f-s', 'numeric', r.saetze, '–')}
       ${cell('wdh', 'f-w', 'numeric', r.wdh, '–')}
@@ -252,7 +297,8 @@ function workoutView(t, isDraft) {
         <button class="btn primary block" data-action="finish" style="margin-top:22px">Training speichern</button>
         <button class="btn danger block" data-action="discard" style="margin-top:6px">Training verwerfen</button>`
       : `
-        <button class="btn primary block" data-action="back" style="margin-top:22px">Fertig</button>
+        <button class="btn block" data-action="compare-prev" style="margin-top:22px">Mit vorherigem Training vergleichen</button>
+        <button class="btn primary block" data-action="back" style="margin-top:10px">Fertig</button>
         <button class="btn danger block" data-action="session-delete" style="margin-top:6px">Training löschen</button>`}
       <p class="small muted" style="text-align:center;margin-top:14px">Alle Eingaben werden sofort auf dem Gerät gespeichert.</p>`,
   };
@@ -367,24 +413,36 @@ VIEWS.exercise = r => {
   const ex = exById(r.id);
   const hist = exerciseHistory(ex.id);
   const group = GROUPS.find(g => g.id === ex.group);
-  const pts = hist.map(h => ({ date: h.s.date, v: num(h.row.kg) })).filter(p => p.v !== null);
+  const main = seriesFor(hist);
+  const pts = main.pts;
+  const volPts = hist.map(h => ({ date: h.s.date, v: perf(h.row)?.vol ?? null })).filter(p => p.v !== null);
   const inPlans = plansContaining(ex.id);
 
   const table = hist.length ? `
     <div class="card table-wrap"><table class="hist-table">
-      <thead><tr><th>Datum</th><th>Sätze</th><th>Wdh</th><th>kg</th><th>Einst. 1</th><th>Einst. 2</th><th>Puls</th></tr></thead>
-      <tbody>${[...hist].reverse().map(h => `
+      <thead><tr><th>Datum</th><th>Sätze</th><th>Wdh</th><th>kg</th><th>Einst. 1</th><th>Einst. 2</th><th>Puls</th><th>±</th></tr></thead>
+      <tbody>${hist.map((h, i) => ({ h, c: i ? compareRows(h.row, hist[i - 1].row) : null })).reverse().map(({ h, c }) => `
         <tr><td>${fmtShort(h.s.date)}${h.s.date.slice(2, 4)}</td><td>${esc(h.row.saetze)}</td><td>${esc(h.row.wdh)}</td><td>${esc(h.row.kg)}</td>
-        <td>${esc(h.row.e1)}</td><td>${esc(h.row.e2)}</td><td>${esc(h.row.puls)}</td></tr>`).join('')}
+        <td>${esc(h.row.e1)}</td><td>${esc(h.row.e2)}</td><td>${esc(h.row.puls)}</td>
+        <td>${c ? `<span class="trend ${c.dir}" title="${esc(c.label)}">${ARROWS[c.dir]}</span>` : ''}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="card empty">Noch keine Einträge für diese Übung.</div>';
 
+  const fmtV = v => `${fmtNum(v)} ${main.unit}`;
+  const stag = stagnation(hist);
   const chart = pts.length >= 2 ? `
-    <div class="section-title">Gewichtsverlauf</div>
+    <div class="section-title">Verlauf</div>
+    ${stag >= 3 ? `<div class="card note warn">Seit ${stag} Trainings keine Steigerung. Versuch es mit 1–2 Wiederholungen mehr oder einer kleinen Gewichtssteigerung.</div>` : ''}
     <div class="card">
-      <div class="chart-title">Gewicht (kg)</div>
-      <div class="chart-sub">${pts.length} Trainings · zuletzt ${fmtNum(pts[pts.length - 1].v)} kg · max. ${fmtNum(Math.max(...pts.map(p => p.v)))} kg</div>
+      <div class="chart-title">${esc(main.label)}</div>
+      <div class="chart-sub">${pts.length} Trainings · Start ${fmtV(pts[0].v)} · zuletzt ${fmtV(pts[pts.length - 1].v)} · max. ${fmtV(Math.max(...pts.map(p => p.v)))}</div>
       <div class="chart" id="chart"></div>
-    </div>` : '';
+    </div>
+    ${volPts.length >= 2 ? `
+    <div class="card" style="margin-top:12px">
+      <div class="chart-title">Volumen (kg × Wdh × Sätze)</div>
+      <div class="chart-sub">Steigt auch, wenn du bei gleichem Gewicht mehr Wiederholungen schaffst</div>
+      <div class="chart" id="chart2"></div>
+    </div>` : ''}` : '';
 
   return {
     title: ex.name,
@@ -405,7 +463,10 @@ VIEWS.exercise = r => {
       ${chart}
       <div class="section-title">Alle Einträge</div>
       ${table}`,
-    after: () => { if (pts.length >= 2) drawChart($('#chart'), pts); },
+    after: () => {
+      if (pts.length >= 2) drawChart($('#chart'), pts, main.unit);
+      if (pts.length >= 2 && volPts.length >= 2) drawChart($('#chart2'), volPts, 'kg Volumen');
+    },
   };
 };
 
@@ -436,6 +497,7 @@ VIEWS.history = () => {
 
   return {
     title: 'Verlauf',
+    actions: list.length >= 2 ? '<button class="btn ghost small" data-action="compare-open">Vergleichen</button>' : '',
     html: `
       ${html || '<div class="empty">Noch keine Trainings gespeichert.</div>'}
       <div class="section-title">Datensicherung</div>
@@ -448,11 +510,153 @@ VIEWS.history = () => {
   };
 };
 
+/* ----- Fortschritt ----- */
+function isoOf(d) { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); }
+function daysAgoISO(n) { const d = new Date(); d.setDate(d.getDate() - n); return isoOf(d); }
+
+function sparkline(pts) {
+  if (pts.length < 2) return '<span class="spark"></span>';
+  const W = 72, H = 26, vals = pts.map(p => p.v);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const x = i => 3 + i * (W - 6) / (pts.length - 1);
+  const y = v => 3 + (hi - v) * (H - 6) / (hi - lo);
+  const n = pts.length - 1;
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true">
+    <polyline points="${pts.map((p, i) => `${x(i)},${y(p.v)}`).join(' ')}"/>
+    <circle cx="${x(n)}" cy="${y(pts[n].v)}" r="3"/></svg>`;
+}
+
+function progressRowHTML(exId) {
+  const ex = exById(exId);
+  const hist = exerciseHistory(exId);
+  if (!hist.length) {
+    return `<button class="list-item" data-action="ex-open" data-id="${exId}">
+      <div class="grow"><div class="t">${esc(ex.name)}</div><div class="s">Noch keine Einträge</div></div><span class="chev">›</span></button>`;
+  }
+  const { unit, pts } = seriesFor(hist);
+  let change = '';
+  if (pts.length >= 2) {
+    const a = pts[0].v, b = pts[pts.length - 1].v;
+    const pct = a ? Math.round((b - a) / a * 100) : 0;
+    change = `${fmtNum(a)} → ${fmtNum(b)} ${unit}${b !== a ? ` (${pct > 0 ? '+' : ''}${pct} %)` : ''}`;
+  } else if (pts.length) {
+    change = `${fmtNum(pts[0].v)} ${unit} · erst 1 Training`;
+  }
+  const lastCmp = hist.length >= 2 ? compareRows(hist[hist.length - 1].row, hist[hist.length - 2].row) : null;
+  const stag = stagnation(hist);
+  return `
+    <button class="list-item" data-action="ex-open" data-id="${exId}">
+      <div class="grow">
+        <div class="t">${esc(ex.name)}</div>
+        <div class="s">${esc(change)}</div>
+        ${stag >= 3 ? `<div class="s" style="color:var(--warn)">⚠ ${stag}× ohne Steigerung</div>` : ''}
+      </div>
+      <div class="prog-right">${sparkline(pts)}${lastCmp ? `<span class="trend ${lastCmp.dir}">${ARROWS[lastCmp.dir]}</span>` : ''}</div>
+      <span class="chev">›</span>
+    </button>`;
+}
+
+VIEWS.progress = () => {
+  const all = sessionsSorted();
+  if (!all.length) {
+    return { title: 'Fortschritt', html: '<div class="empty">Sobald du Trainings gespeichert hast, siehst du hier deine Entwicklung: Steigerungen, Verschlechterungen und Verläufe pro Übung.</div>' };
+  }
+  const monday = (() => { const d = new Date(); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return isoOf(d); })();
+  const thisWeek = all.filter(s => s.date >= monday).length;
+  const last28 = all.filter(s => s.date > daysAgoISO(28)).length;
+
+  // Übungen mit mindestens zwei Einträgen: erster gegen letzten Eintrag
+  const exIds = [...new Set(all.flatMap(s => s.rows.map(r => r.exId)))];
+  let up = 0, down = 0, rated = 0;
+  for (const id of exIds) {
+    const h = exerciseHistory(id);
+    if (h.length < 2) continue;
+    const c = compareRows(h[h.length - 1].row, h[0].row);
+    if (!c) continue;
+    rated++;
+    if (c.dir === 'up') up++;
+    if (c.dir === 'down') down++;
+  }
+
+  const planIds = new Set(db.plans.flatMap(p => p.items.map(i => i.exId)));
+  const others = exIds.filter(id => !planIds.has(id));
+  const sections = db.plans.filter(p => p.items.length).map(p => `
+    <div class="section-title"><span class="dot c-${p.color}"></span> ${esc(p.name)}</div>
+    <div class="list">${p.items.map(it => progressRowHTML(it.exId)).join('')}</div>`).join('');
+
+  return {
+    title: 'Fortschritt',
+    html: `
+      <div class="stats">
+        <div class="stat card"><div class="v">${all.length}</div><div class="l">Trainings gesamt</div></div>
+        <div class="stat card"><div class="v">${thisWeek}</div><div class="l">diese Woche</div></div>
+        <div class="stat card"><div class="v">${fmtNum(last28 / 4)}</div><div class="l">Ø pro Woche (4 Wochen)</div></div>
+        <div class="stat card"><div class="v"><span class="trend up">↑ ${up}</span> <span class="trend down">↓ ${down}</span></div><div class="l">Übungen seit Start (${rated} bewertet)</div></div>
+      </div>
+      <p class="small muted" style="margin:10px 4px 0">Bewertet wird das Volumen (kg × Wdh × Sätze), bei Übungen ohne Gewicht die Wiederholungen. Der Pfeil rechts zeigt die Veränderung zum vorherigen Training.</p>
+      ${sections}
+      ${others.length ? `<div class="section-title">Weitere Übungen</div><div class="list">${others.map(progressRowHTML).join('')}</div>` : ''}
+      <button class="btn block" data-action="compare-open" style="margin-top:18px">Zwei Trainings vergleichen</button>`,
+  };
+};
+
+/* ----- Vergleich ----- */
+function previousSession(s) {
+  const older = sessionsSorted().filter(x => isBefore(x, s));
+  return older.find(x => x.planId === s.planId) || older[0] || sessionsSorted().find(x => x.id !== s.id);
+}
+
+VIEWS.compare = r => {
+  const all = sessionsSorted();
+  if (all.length < 2) {
+    return { title: 'Vergleich', html: '<div class="empty">Für einen Vergleich brauchst du mindestens zwei gespeicherte Trainings.</div>' };
+  }
+  const find = id => db.sessions.find(s => s.id === id);
+  const b0 = find(r.b) || all[0];
+  const a0 = find(r.a) || previousSession(b0);
+  const [older, newer] = isBefore(a0, b0) ? [a0, b0] : [b0, a0];
+  r.a = a0.id; r.b = b0.id;
+
+  const label = s => `${fmtDate(s.date)} · ${planById(s.planId)?.name || 'Frei'}`;
+  const select = (key, sel) => `<select class="field" data-action-input="${key}">${all.map(s =>
+    `<option value="${s.id}"${s.id === sel.id ? ' selected' : ''}>${esc(label(s))}</option>`).join('')}</select>`;
+
+  const ids = [...new Set([...newer.rows, ...older.rows].map(x => x.exId))];
+  let up = 0, down = 0, same = 0, volA = 0, volB = 0;
+  const cards = ids.map(id => {
+    const ra = older.rows.find(x => x.exId === id), rb = newer.rows.find(x => x.exId === id);
+    const c = ra && rb ? compareRows(rb, ra) : null;
+    if (c) { c.dir === 'up' ? up++ : c.dir === 'down' ? down++ : same++; volA += perf(ra).vol || 0; volB += perf(rb).vol || 0; }
+    const line = (s, row) => `<div class="cmp-line"><span class="cmp-date">${fmtShort(s.date)}</span>${row ? esc(rowSummary(row)) : '<i class="muted">nicht trainiert</i>'}</div>`;
+    return `
+      <div class="cmp-card">
+        <div class="cmp-head"><button class="ex-name" data-action="ex-open" data-id="${id}">${esc(exById(id).name)}</button>${trendChip(c)}</div>
+        ${line(older, ra)}${line(newer, rb)}
+      </div>`;
+  }).join('');
+  const volPct = volA ? Math.round((volB - volA) / volA * 100) : null;
+
+  return {
+    title: 'Vergleich',
+    html: `
+      <label class="lbl">Früheres Training</label>${select('cmp-a', a0)}
+      <label class="lbl">Späteres Training</label>${select('cmp-b', b0)}
+      ${a0.id === b0.id ? '<p class="small muted">Wähle zwei verschiedene Trainings.</p>' : ''}
+      <div class="stats" style="margin-top:16px">
+        <div class="stat card"><div class="v"><span class="trend up">↑ ${up}</span> <span class="trend down">↓ ${down}</span> <span class="trend same">= ${same}</span></div><div class="l">Übungen besser / schlechter / gleich</div></div>
+        <div class="stat card"><div class="v">${volPct === null ? '–' : `${volPct > 0 ? '+' : ''}${volPct} %`}</div><div class="l">Gesamtvolumen (gleiche Übungen mit Gewicht)</div></div>
+      </div>
+      <div class="section-title">Übungen</div>
+      <div class="list">${cards}</div>`,
+  };
+};
+
 /* ================= Diagramm ================= */
 
-function drawChart(el, pts) {
+function drawChart(el, pts, unit) {
   const W = el.clientWidth - 24 || 300, H = 180;
-  const pad = { l: 34, r: 10, t: 10, b: 22 };
+  const pad = { l: 40, r: 10, t: 10, b: 22 };
   const vals = pts.map(p => p.v);
   let lo = Math.min(...vals), hi = Math.max(...vals);
   if (lo === hi) { lo -= 5; hi += 5; }
@@ -465,7 +669,7 @@ function drawChart(el, pts) {
   for (let v = lo; v <= hi + 1e-9; v += step) ticks.push(v);
 
   el.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Gewichtsverlauf">
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Verlauf in ${esc(unit)}">
       <g class="grid">${ticks.map(v => `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v)}" y2="${y(v)}"/>`).join('')}</g>
       <g class="axis">
         ${ticks.map(v => `<text x="${pad.l - 6}" y="${y(v) + 4}" text-anchor="end">${fmtNum(v)}</text>`).join('')}
@@ -489,7 +693,7 @@ function drawChart(el, pts) {
     circles.forEach((c, i) => c.classList.toggle('active', i === best));
     cross.setAttribute('x1', x(best)); cross.setAttribute('x2', x(best)); cross.setAttribute('visibility', 'visible');
     tip.hidden = false;
-    tip.textContent = `${fmtDate(pts[best].date)}: ${fmtNum(pts[best].v)} kg`;
+    tip.textContent = `${fmtDate(pts[best].date)}: ${fmtNum(pts[best].v)} ${unit}`;
     tip.style.left = `${12 + x(best) * box.width / W}px`;
     tip.style.top = `${14 + y(pts[best].v) * box.height / H}px`;
   };
@@ -589,15 +793,19 @@ const ACTIONS = {
     const t = db.draft;
     if (!t.rows.length && !t.cardio.length) { toast('Noch nichts eingetragen'); return; }
     if (!t.rows.some(r => r.done) && !confirm('Keine Übung abgehakt. Trotzdem speichern?')) return;
+    const dirs = t.rows.map(r => { const l = lastEntry(r.exId); return l && compareRows(r, l.row)?.dir; });
+    const ups = dirs.filter(d => d === 'up').length, downs = dirs.filter(d => d === 'down').length;
     db.sessions.push(t); db.draft = null; save();
     render(); window.scrollTo(0, 0);
-    toast('Training gespeichert 💪');
+    toast(`Training gespeichert 💪${ups || downs ? ` · ${ups}× ↑ ${downs}× ↓` : ''}`);
   },
   'discard': () => {
     if (!confirm('Dieses Training wirklich verwerfen? Die Eingaben gehen verloren.')) return;
     db.draft = null; save(); render();
   },
   'session-open': el => push({ view: 'session', id: el.dataset.id }),
+  'compare-open': () => push({ view: 'compare' }),
+  'compare-prev': () => push({ view: 'compare', b: workoutTarget().id }),
   'session-delete': () => {
     const t = workoutTarget();
     if (!confirm(`Training vom ${fmtDate(t.date)} löschen?`)) return;
@@ -690,8 +898,12 @@ document.addEventListener('input', e => {
   const el = e.target;
   // Tracking-Zellen
   if (el.dataset.field) {
-    const t = workoutTarget(); const i = +el.closest('[data-row]').dataset.row;
-    t.rows[i][el.dataset.field] = el.value; save(); return;
+    const t = workoutTarget(); const rowEl = el.closest('[data-row]'); const i = +rowEl.dataset.row;
+    t.rows[i][el.dataset.field] = el.value; save();
+    const last = lastEntry(t.rows[i].exId, t === db.draft ? null : t);
+    const slot = rowEl.querySelector('.trend-slot');
+    if (slot && last) slot.innerHTML = trendChip(compareRows(t.rows[i], last.row));
+    return;
   }
   if (el.dataset.cfield) {
     const t = workoutTarget(); const i = +el.closest('[data-cardio]').dataset.cardio;
@@ -705,6 +917,8 @@ document.addEventListener('input', e => {
     case 'date': if (el.value) { workoutTarget().date = el.value; save(); } break;
     case 'plan-name': planById(cur().id).name = el.value; $('#title').textContent = el.value || 'Plan'; save(); break;
     case 'lib-search': cur().q = el.value; $('#libList').innerHTML = libraryListHTML(el.value); break;
+    case 'cmp-a': cur().a = el.value; render(); break;
+    case 'cmp-b': cur().b = el.value; render(); break;
     case 'pick-search': $('#pickList').innerHTML = pickerListHTML(el.value); break;
   }
 });
